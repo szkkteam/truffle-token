@@ -7,13 +7,13 @@ module.exports = (artifacts: Truffle.Artifacts, web3: Web3) => {
       network: Network,
       accounts: string[]
     ) => {
-      const MockToken = artifacts.require("MockToken");
+      const MagicToken = artifacts.require("MagicToken");
   
-      await deployer.deploy(MockToken, ether('1000') );
+      await deployer.deploy(MagicToken);
   
-      const mockToken = await MockToken.deployed();
+      const magicToken = await MagicToken.deployed();
       console.log(
-        `MockToken deployed at ${mockToken.address} in network: ${network}.`
+        `MagicToken deployed at ${magicToken.address} in network: ${network}.`
       );
     };
   };

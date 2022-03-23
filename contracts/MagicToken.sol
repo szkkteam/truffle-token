@@ -57,8 +57,8 @@ contract MagicToken is ERC20, Ownable {
         
         uint256 marketingFee = 2;
         uint256 liquidityFee = 2;
-        uint256 rewardBuyFee = 2;
-        uint256 rewardSellFee = 2;
+        uint256 rewardBuyFee = 4;
+        uint256 rewardSellFee = 4;
         uint256 burnFee = 1;
 
         uint256 totalSupply = 1e11 * 1e18;
