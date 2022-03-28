@@ -47,6 +47,13 @@
        timeoutBlocks: 200,
        skipDryRun: true
      },
+     kovan: {
+      provider: () => {
+        return new HDWalletProvider(TESTNET_DEPLOYER_KEY, `https://kovan.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161`)
+      },
+      network_id: '42',
+      skipDryRun: true
+    },
    },
    plugins: [
      'truffle-plugin-verify',
@@ -67,7 +74,7 @@
        // docker: true,        // Use "0.5.1" you've installed locally with docker (default: false)
        settings: {          // See the solidity docs for advice about optimization and evmVersion
          optimizer: {
-           enabled: true,
+           enabled: false,
            runs: 200
          },
        }

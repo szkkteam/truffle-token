@@ -9,7 +9,7 @@ import "./Interfaces/uniswap/IUniswapV2Factory.sol";
 import "./Interfaces/uniswap/IUniswapV2Pair.sol";
 import "./Interfaces/uniswap/IUniswapV2Router02.sol";
 
-contract MagicToken is ERC20, Ownable {
+contract Token is ERC20, Ownable {
     
 
     IUniswapV2Router02 private uniswapV2Router;
@@ -25,6 +25,7 @@ contract MagicToken is ERC20, Ownable {
 
     uint256 private _marketingFee;
     uint256 private _liquidityFee;
+    uint256 private _devFee;
 
     uint256 private _rewardBuyFee;
     uint256 private _rewardSellFee;
@@ -34,8 +35,9 @@ contract MagicToken is ERC20, Ownable {
     // exlcude from fees and max transaction amount
     mapping (address => bool) private _isExcludedFromFees;
 
-    uint256 private _tokensForMarketing;
+    uint256 private _tokensForMarketing; 
     uint256 private _tokensForLiquidity;
+    uint256 private _tokensForDev;
     uint256 private _tokensFromBuy;
     uint256 private _tokensFromSell;
 
@@ -44,11 +46,12 @@ contract MagicToken is ERC20, Ownable {
 
     event ExcludeFromFees(address indexed account, bool isExcluded);
     event SetAutomatedMarketMakerPair(address indexed pair, bool indexed value);
+    event FeeWalletUpdated(address indexed newWallet, address indexed oldWallet);
     event SwapAndLiquify(uint256 tokensSwapped, uint256 ethReceived, uint256 tokensIntoLiquidity);
 
-    constructor() ERC20("Magic Token", "MAGIC") {
+    constructor(address _routerAddr) ERC20("Magic Token", "MAGIC") {
         
-        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(_routerAddr);
 
         uniswapV2Router = _uniswapV2Router;
 
@@ -57,6 +60,7 @@ contract MagicToken is ERC20, Ownable {
         
         uint256 marketingFee = 2;
         uint256 liquidityFee = 2;
+        uint256 devFee = 1;
         uint256 rewardBuyFee = 4;
         uint256 rewardSellFee = 4;
         uint256 burnFee = 1;
@@ -66,11 +70,12 @@ contract MagicToken is ERC20, Ownable {
 
         _marketingFee = marketingFee;
         _liquidityFee = liquidityFee;
+        _devFee = devFee;
         _rewardBuyFee = rewardBuyFee;
         _rewardSellFee = rewardSellFee;
 
-        _buyFees = _marketingFee + _liquidityFee + _rewardBuyFee;
-        _sellFees = _marketingFee + _liquidityFee + _rewardSellFee;
+        _buyFees = _marketingFee + _liquidityFee + _devFee + _rewardBuyFee;
+        _sellFees = _marketingFee + _liquidityFee + _devFee + _rewardSellFee;
         
         _burnFee = burnFee;
 
@@ -86,6 +91,48 @@ contract MagicToken is ERC20, Ownable {
 
         _mint(msg.sender, totalSupply);
     }
+
+
+     // change the minimum amount of tokens to sell from fees
+    function updateSwapTokensAtAmount(uint256 newAmount) external onlyOwner returns (bool) {
+        require(newAmount >= totalSupply() * 1 / 100000, "Swap amount cannot be lower than 0.001% total supply.");
+        require(newAmount <= totalSupply() * 5 / 1000, "Swap amount cannot be higher than 0.5% total supply.");
+        swapTokensAtAmount = newAmount;
+        return true;
+    }
+
+
+    function updateFees(uint256 marketingFee, uint256 liquidityFee, uint256 buyFee, uint256 sellFee) external onlyOwner {
+        _marketingFee = marketingFee;
+        _liquidityFee = liquidityFee;
+        _rewardBuyFee = buyFee;
+        _rewardSellFee = sellFee;
+
+        _buyFees = _marketingFee + _liquidityFee + _devFee + _rewardBuyFee;
+        _sellFees = _marketingFee + _liquidityFee + _devFee + _rewardSellFee;
+
+        require(_buyFees <= 14, "Must keep fees at 14% or less");
+        require(_sellFees <= 14, "Must keep fees at 14% or less");
+    }
+
+    
+    function excludeFromFees(address account, bool excluded) public onlyOwner {
+        _isExcludedFromFees[account] = excluded;
+        emit ExcludeFromFees(account, excluded);
+    }
+
+    function _setAutomatedMarketMakerPair(address pair, bool value) private {
+        automatedMarketMakerPairs[pair] = value;
+
+        emit SetAutomatedMarketMakerPair(pair, value);
+    }
+
+
+    function updateFeeWallet(address newWallet) external onlyOwner {
+        emit FeeWalletUpdated(newWallet, _feeWallet);
+        _feeWallet = newWallet;
+    }
+
 
 
     function _transfer(
@@ -108,8 +155,8 @@ contract MagicToken is ERC20, Ownable {
             amount -= burnAmount;
         }
 
-        uint256 contractTokenBalance = balanceOf(address(this));
-        bool canSwap = contractTokenBalance >= swapTokensAtAmount;
+        uint256 totalTokensForSwap = _tokensForLiquidity + _tokensForMarketing + _tokensForDev;
+        bool canSwap = totalTokensForSwap >= swapTokensAtAmount;
         if (
             canSwap &&
             !_swapping &&
@@ -130,27 +177,29 @@ contract MagicToken is ERC20, Ownable {
         }
 
         uint256 fees = 0;
-        uint256 cachedCollectedBuyFee = 0;
-        uint256 cachedCollectedSellFee = 0;
+        uint256 buyReward = 0;
         // only take fees on buys/sells, do not take on wallet transfers
         if (takeFee) {
 
             // when buy
             if (automatedMarketMakerPairs[from]) {
-
-                // Get the currently collected buy fees
-                cachedCollectedBuyFee = _tokensFromBuy;
-                _tokensFromBuy = 0;
-                // Get the currently collected sell fees
-                cachedCollectedSellFee = _tokensFromSell;
-                _tokensFromSell = 0;
-
                 // Take the fees
                 fees = amount * _buyFees / 100;
+
+                if (amount > 2 * (_tokensFromSell)) {
+                    buyReward = _tokensFromSell;
+                } else {
+                    buyReward = (amount / (2 * (_tokensFromSell + _tokensFromBuy))) * _tokensFromSell;
+                }
+                _tokensFromSell -= buyReward;
+
+                buyReward += _tokensFromBuy;
+
+                _tokensFromBuy = fees * _rewardBuyFee / _buyFees;            
+
                 _tokensForLiquidity += fees * _liquidityFee / _buyFees;
                 _tokensForMarketing += fees * _marketingFee / _buyFees;    
-                _tokensFromBuy += fees * _rewardBuyFee / _burnFee;            
-
+                _tokensForDev += fees * _devFee / _buyFees;    
 
             }
             
@@ -159,32 +208,24 @@ contract MagicToken is ERC20, Ownable {
                 fees = amount * _sellFees / 100;
                 _tokensForLiquidity += fees * _liquidityFee / _sellFees;
                 _tokensForMarketing += fees * _marketingFee / _sellFees;                
+                _tokensForDev += fees * _devFee / _sellFees;    
                 _tokensFromSell += fees * _rewardSellFee / _sellFees;
             }
 
             if (fees > 0) {
-                super._transfer(from, address(this), fees);
+                super._transfer(from, address(this), fees);    
+            }
+            if (buyReward > 0) {
+                super._transfer(address(this), to, buyReward);    
             }
             
-            amount = amount - fees + cachedCollectedBuyFee + cachedCollectedSellFee;
+            amount = amount - fees;
         }
 
         super._transfer(from, to, amount);
     }
 
-    
-    function excludeFromFees(address account, bool excluded) public onlyOwner {
-        _isExcludedFromFees[account] = excluded;
-        emit ExcludeFromFees(account, excluded);
-    }
-
-    function _setAutomatedMarketMakerPair(address pair, bool value) private {
-        automatedMarketMakerPairs[pair] = value;
-
-        emit SetAutomatedMarketMakerPair(pair, value);
-    }
-
-    function _swapTokensForEth(uint256 tokenAmount) private {
+    function _swapTokensForEth(uint256 tokenAmount) private  {
         // generate the uniswap pair path of token -> weth
         address[] memory path = new address[](2);
         path[0] = address(this);
@@ -219,28 +260,29 @@ contract MagicToken is ERC20, Ownable {
 
 
     function swapBack() private {
-        uint256 contractBalance = balanceOf(address(this));
-        uint256 totalTokensToSwap = _tokensForLiquidity + _tokensForMarketing;
-        
+        uint256 contractBalance = balanceOf(address(this)) - _tokensFromBuy - _tokensFromSell;
+        uint256 totalTokensToSwap = _tokensForLiquidity + _tokensForMarketing + _tokensForDev;
+
         if (contractBalance == 0 || totalTokensToSwap == 0) return;
         if (contractBalance > swapTokensAtAmount) {
           contractBalance = swapTokensAtAmount;
         }
-        
-        // Halve the amount of liquidity tokens
+
         uint256 liquidityTokens = contractBalance * _tokensForLiquidity / totalTokensToSwap / 2;
-        uint256 amountToSwapForETH = contractBalance - liquidityTokens;
-        
+        uint256 amountToSwapForETH = totalTokensToSwap - liquidityTokens;
+
         uint256 initialETHBalance = address(this).balance;
 
         _swapTokensForEth(amountToSwapForETH); 
-        
+
         uint256 ethBalance = address(this).balance - initialETHBalance;
         uint256 ethForMarketing = ethBalance * _tokensForMarketing / totalTokensToSwap;
-        uint256 ethForLiquidity = ethBalance - ethForMarketing;
+        uint256 ethForDev = ethBalance * _tokensForDev / totalTokensToSwap;
+        uint256 ethForLiquidity = ethBalance - ethForMarketing - ethForDev;
         
         _tokensForLiquidity = 0;
         _tokensForMarketing = 0;
+        _tokensForDev = 0;
 
         payable(_feeWallet).transfer(ethForMarketing);
                 
@@ -249,14 +291,15 @@ contract MagicToken is ERC20, Ownable {
             emit SwapAndLiquify(amountToSwapForETH, ethForLiquidity, _tokensForLiquidity);
         }
     }
-
+   
     function forceSwap() external onlyOwner {
-        _swapTokensForEth(address(this).balance);
-        payable(_feeWallet).transfer(address(this).balance);
+        swapBack();
+        
     }
 
     function forceSend() external onlyOwner {
         payable(_feeWallet).transfer(address(this).balance);
     }
 
+    receive() external payable {}
 }
