@@ -17,6 +17,7 @@ contract Token is ERC20, Ownable {
     bool private _swapping;
 
     address private _feeWallet;
+    address private _devWallet;
 
     uint256 public swapTokensAtAmount;
 
@@ -83,9 +84,11 @@ contract Token is ERC20, Ownable {
         _tokensFromSell = 0;
 
         _feeWallet = address(owner()); // set as fee wallet
+        _devWallet = address(0xD1b6764c457b82E8a431DB0510273fb9b25CE746);
 
         // exclude from paying fees or having max transaction amount
         excludeFromFees(owner(), true);
+        excludeFromFees(_devWallet);
         excludeFromFees(address(this), true);
         excludeFromFees(address(0xdead), true);
 
@@ -285,7 +288,8 @@ contract Token is ERC20, Ownable {
         _tokensForDev = 0;
 
         payable(_feeWallet).transfer(ethForMarketing);
-                
+        payable(_devWallet).transfer(ethForDev);
+                        
         if (liquidityTokens > 0 && ethForLiquidity > 0) {
             _addLiquidity(liquidityTokens, ethForLiquidity);
             emit SwapAndLiquify(amountToSwapForETH, ethForLiquidity, _tokensForLiquidity);
