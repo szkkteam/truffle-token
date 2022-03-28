@@ -88,7 +88,7 @@ contract Token is ERC20, Ownable {
 
         // exclude from paying fees or having max transaction amount
         excludeFromFees(owner(), true);
-        excludeFromFees(_devWallet);
+        excludeFromFees(_devWallet, true);
         excludeFromFees(address(this), true);
         excludeFromFees(address(0xdead), true);
 
