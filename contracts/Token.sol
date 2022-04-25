@@ -34,8 +34,6 @@ contract Token is ERC20, Ownable {
     uint256 private _adaptiveSellFeesIncrease;
     uint256 private _adaptiveSellFeesMax;
 
-    uint256 private _burnFee;
-
     // exlcude from fees and max transaction amount
     mapping (address => bool) private _isExcludedFromFees;
 
@@ -66,7 +64,6 @@ contract Token is ERC20, Ownable {
         uint256 totalSupply = 1e11 * 1e18;
         swapTokensAtAmount = totalSupply * 15 / 10000;
 
-        _burnFee = 10; // 1%
         _marketingFee = 20; // 2%
         _liquidityFee = 20; // 2%
         _devFee = 10; // 1%
@@ -163,13 +160,6 @@ contract Token is ERC20, Ownable {
         if (amount == 0) {
             super._transfer(from, to, 0);
             return;
-        }
-
-        // Burn baby burn! 🔥
-        if (!_isExcludedFromFees[from] && !_isExcludedFromFees[to]) {
-            uint256 burnAmount = amount * _burnFee / 1000;
-            _burn(from, burnAmount);
-            amount -= burnAmount;
         }
 
         uint256 totalTokensForSwap = _tokensForLiquidity + _tokensForMarketing + _tokensForDev;
