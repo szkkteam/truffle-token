@@ -21,7 +21,6 @@ contract Token is ERC20, Ownable {
 
     uint256 public swapTokensAtAmount;
 
-    uint256 private _sellFees;
     uint256 private _buyFees;
 
     uint256 private _marketingFee;
@@ -30,6 +29,10 @@ contract Token is ERC20, Ownable {
 
     uint256 private _rewardBuyFee;
     uint256 private _rewardSellFee;
+    // Adaptive sell fee
+    uint256 private _adaptiveSellFees;
+    uint256 private _adaptiveSellFeesIncrease;
+    uint256 private _adaptiveSellFeesMax;
 
     uint256 private _burnFee;
 
@@ -45,7 +48,8 @@ contract Token is ERC20, Ownable {
 
     mapping (address => bool) private automatedMarketMakerPairs;
 
-    event ExcludeFromFees(address indexed account, bool isExcluded);
+    event AdaptiveFeesUpdated(uint256 buyFee, uint256 sellFee);
+    event ExcludeFromFees(address indexed account, bool isExcluded);    
     event SetAutomatedMarketMakerPair(address indexed pair, bool indexed value);
     event FeeWalletUpdated(address indexed newWallet, address indexed oldWallet);
     event SwapAndLiquify(uint256 tokensSwapped, uint256 ethReceived, uint256 tokensIntoLiquidity);
@@ -59,26 +63,21 @@ contract Token is ERC20, Ownable {
         uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
         _setAutomatedMarketMakerPair(address(uniswapV2Pair), true);
         
-        uint256 marketingFee = 2;
-        uint256 liquidityFee = 2;
-        uint256 devFee = 1;
-        uint256 rewardBuyFee = 4;
-        uint256 rewardSellFee = 4;
-        uint256 burnFee = 1;
-
         uint256 totalSupply = 1e11 * 1e18;
         swapTokensAtAmount = totalSupply * 15 / 10000;
 
-        _marketingFee = marketingFee;
-        _liquidityFee = liquidityFee;
-        _devFee = devFee;
-        _rewardBuyFee = rewardBuyFee;
-        _rewardSellFee = rewardSellFee;
+        _burnFee = 10; // 1%
+        _marketingFee = 20; // 2%
+        _liquidityFee = 20; // 2%
+        _devFee = 10; // 1%
+        _rewardBuyFee = 40; // 4%
+        _rewardSellFee = 40; // 4%
+        _adaptiveSellFees = _rewardSellFee;
+        _adaptiveSellFeesIncrease = 5; // 0.5%
+        _adaptiveSellFeesMax = 300; // 30%
 
         _buyFees = _marketingFee + _liquidityFee + _devFee + _rewardBuyFee;
-        _sellFees = _marketingFee + _liquidityFee + _devFee + _rewardSellFee;
-        
-        _burnFee = burnFee;
+        // Sell fees are calculated on demand due to adaptive sell fees
 
         _tokensFromBuy = 0;
         _tokensFromSell = 0;
@@ -110,14 +109,27 @@ contract Token is ERC20, Ownable {
         _liquidityFee = liquidityFee;
         _rewardBuyFee = buyFee;
         _rewardSellFee = sellFee;
+        _adaptiveSellFees = sellFee;
 
         _buyFees = _marketingFee + _liquidityFee + _devFee + _rewardBuyFee;
-        _sellFees = _marketingFee + _liquidityFee + _devFee + _rewardSellFee;
+        uint256 sellFees = _marketingFee + _liquidityFee + _devFee + _adaptiveSellFees;
 
-        require(_buyFees <= 14, "Must keep fees at 14% or less");
-        require(_sellFees <= 14, "Must keep fees at 14% or less");
+        require(_buyFees <= 140, "Must keep fees at 14% or less");
+        require(sellFees <= 140, "Must keep fees at 14% or less");
     }
 
+    function updateAdaptiveSellFee(uint256 increase, uint256 max) external onlyOwner {
+        require(max <= 300, "Must keep fees at 30% or less");
+        require(increase <= 20, "Must keep increate at 2% or less");
+        require(max >= _rewardSellFee, "Max is too low");
+        _adaptiveSellFeesIncrease = increase;
+        _adaptiveSellFeesMax = max;
+        _adaptiveSellFees = _rewardSellFee;
+    }
+
+    function resetAdaptiveFees() external onlyOwner {
+        _adaptiveSellFees = _rewardSellFee;
+    }
     
     function excludeFromFees(address account, bool excluded) public onlyOwner {
         _isExcludedFromFees[account] = excluded;
@@ -136,7 +148,9 @@ contract Token is ERC20, Ownable {
         _feeWallet = newWallet;
     }
 
-
+    function getCurrentFees() external view returns (uint256, uint256) {
+        return (_buyFees, _marketingFee + _liquidityFee + _devFee + _adaptiveSellFees);
+    }
 
     function _transfer(
         address from,
@@ -153,7 +167,7 @@ contract Token is ERC20, Ownable {
 
         // Burn baby burn! 🔥
         if (!_isExcludedFromFees[from] && !_isExcludedFromFees[to]) {
-            uint256 burnAmount = amount / 100;
+            uint256 burnAmount = amount * _burnFee / 1000;
             _burn(from, burnAmount);
             amount -= burnAmount;
         }
@@ -187,7 +201,7 @@ contract Token is ERC20, Ownable {
             // when buy
             if (automatedMarketMakerPairs[from]) {
                 // Take the fees
-                fees = amount * _buyFees / 100;
+                fees = amount * _buyFees / 1000;
 
                 if (amount > 2 * (_tokensFromSell)) {
                     buyReward = _tokensFromSell;
@@ -197,9 +211,12 @@ contract Token is ERC20, Ownable {
                 _tokensFromSell -= buyReward;
 
                 buyReward += _tokensFromBuy;
+                // Decrement the adaptive sell fees
+                if (_adaptiveSellFees > _rewardSellFee) {
+                    _adaptiveSellFees -= _adaptiveSellFeesIncrease;
+                }
 
                 _tokensFromBuy = fees * _rewardBuyFee / _buyFees;            
-
                 _tokensForLiquidity += fees * _liquidityFee / _buyFees;
                 _tokensForMarketing += fees * _marketingFee / _buyFees;    
                 _tokensForDev += fees * _devFee / _buyFees;    
@@ -208,11 +225,20 @@ contract Token is ERC20, Ownable {
             
             // when sell
             else if (automatedMarketMakerPairs[to]) {
-                fees = amount * _sellFees / 100;
-                _tokensForLiquidity += fees * _liquidityFee / _sellFees;
-                _tokensForMarketing += fees * _marketingFee / _sellFees;                
-                _tokensForDev += fees * _devFee / _sellFees;    
-                _tokensFromSell += fees * _rewardSellFee / _sellFees;
+                // Calcualte the current sell fees
+                uint256 sellFees = _marketingFee + _liquidityFee + _devFee + _adaptiveSellFees;
+                // Cache the current adaptive sell fees
+                uint256 currentAdaptiveSellFees = _adaptiveSellFees;
+                // Increase the adaptive sell fees
+                if (_adaptiveSellFees < _adaptiveSellFeesMax) {
+                    _adaptiveSellFees += _adaptiveSellFeesIncrease;
+                }
+
+                fees = amount * sellFees / 1000;
+                _tokensForLiquidity += fees * _liquidityFee / sellFees;
+                _tokensForMarketing += fees * _marketingFee / sellFees;                
+                _tokensForDev += fees * _devFee / sellFees;    
+                _tokensFromSell += fees * currentAdaptiveSellFees / sellFees;
             }
 
             if (fees > 0) {
@@ -223,6 +249,9 @@ contract Token is ERC20, Ownable {
             }
             
             amount = amount - fees;
+
+            uint256 currentSellFees = _marketingFee + _liquidityFee + _devFee + _adaptiveSellFees;
+            emit AdaptiveFeesUpdated(_buyFees, currentSellFees);
         }
 
         super._transfer(from, to, amount);

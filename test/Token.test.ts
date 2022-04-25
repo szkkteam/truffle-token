@@ -15,11 +15,16 @@ const wethAddr = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 const routerAddr = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D";
 
 
-contract("Token", ([deployer, user1, user2, user3, user4]) => {
+contract("Token", ([deployer, user1, user2, user3, ...users]) => {
 
     const fundWeth = async (to: string, amount: string | number | BN) => {
         const weth = await WETH.at(wethAddr);
         await weth.transferFrom(wethWhale, to, amount, {from: wethWhale});
+    }
+
+    const fundToken = async (to: string, amount: string | number | BN) => {
+        const instance = await TokenContract.deployed();
+        await instance.transfer(to, amount, {from: deployer});
     }
 
     const addLiquidity = async (amount1: string, amount2: string) => {
@@ -63,7 +68,7 @@ contract("Token", ([deployer, user1, user2, user3, user4]) => {
         );
     }
 
-    const getAmountsOut = async(amountIn: string | BN | number) => {
+    const getAmountsOutBuy = async(amountIn: string | BN | number) => {
         const instance = await TokenContract.deployed();
         const router = await Router.at(routerAddr);
         const weth = await WETH.at(wethAddr);     
@@ -73,6 +78,22 @@ contract("Token", ([deployer, user1, user2, user3, user4]) => {
         );
 
         return amount[1];
+    }
+
+    const getAmountsOutSell = async(amountIn: string | BN | number) => {
+        const instance = await TokenContract.deployed();
+        const router = await Router.at(routerAddr);
+        const weth = await WETH.at(wethAddr);     
+
+        const amount = await router.getAmountsOut(amountIn, 
+            [instance.address, weth.address],
+        );
+
+        return amount[1];
+    }
+
+    const getSlippage = (expectedOutAmount: BN, actualOutAmount: BN) => {
+        return 1 - ((actualOutAmount.muln(1000).div(expectedOutAmount)).toNumber() / 1000)
     }
 
     const sell = async (from: string, amountIn: string | BN | number, amountOut: string | BN | number = 0 ) => {
@@ -90,6 +111,30 @@ contract("Token", ([deployer, user1, user2, user3, user4]) => {
             Date.now() + 1000 * 60 * 1,       
             {from}       
         );
+    }
+
+    
+    const buyCheckSlippage = async (from: string, amount : BN | string | number) => {
+        const instance = await TokenContract.deployed();
+        const balanceBefore = await instance.balanceOf(from);
+
+        const expectedOutAmount = await getAmountsOutBuy(amount);
+        await buy(from, amount);
+        const balanceAfter = await instance.balanceOf(from);
+        const actualOutAmount = balanceAfter.sub(balanceBefore);
+        return getSlippage(expectedOutAmount, actualOutAmount);
+    }
+
+    const sellCheckSlippage = async (from: string, amount : BN | string | number) => {
+        const instance = await TokenContract.deployed();
+        const weth = await WETH.at(wethAddr);     
+        const balanceBefore = await weth.balanceOf(from);
+
+        const expectedOutAmount = await getAmountsOutSell(amount);
+        await sell(from, amount);
+        const balanceAfter = await weth.balanceOf(from);
+        const actualOutAmount = balanceAfter.sub(balanceBefore);
+        return getSlippage(expectedOutAmount, actualOutAmount);
     }
 
     before(async () => {
@@ -112,6 +157,23 @@ contract("Token", ([deployer, user1, user2, user3, user4]) => {
     });
 
     describe("owner functions", async () => {
+
+        after(async () => {
+            const instance = await TokenContract.deployed();
+            
+            // Restore the default fee's because they are used for later calculation
+            const marketingFee = new BN(20);
+            const liquidityFee = new BN(20);
+            const buyFee = new BN(40);
+            const sellFee = new BN(40);
+
+            await truffleAssert.passes(instance.updateFees(marketingFee, liquidityFee, buyFee, sellFee, {from: deployer}));
+
+            const adaptiveFeeIncrease = new BN(5);
+            const adaptiveFeeMax = new BN(300);
+
+            await truffleAssert.passes(instance.updateAdaptiveSellFee(adaptiveFeeIncrease, adaptiveFeeMax, {from: deployer}));
+        });
 
         it("should update swapTokensAmount", async () => {
             const instance = await TokenContract.deployed();
@@ -141,21 +203,57 @@ contract("Token", ([deployer, user1, user2, user3, user4]) => {
         it("should update fees", async () => {
             const instance = await TokenContract.deployed();
 
-            const marketingFee = new BN(1);
-            const liquidityFee = new BN(1);
-            const buyFee = new BN(1);
-            const sellFee = new BN(1);
+            const marketingFee = new BN(10);
+            const liquidityFee = new BN(10);
+            const buyFee = new BN(10);
+            const sellFee = new BN(10);
 
             await truffleAssert.passes(instance.updateFees(marketingFee, liquidityFee, buyFee, sellFee, {from: deployer}));
+        });
+
+        it("should update adaptive fees", async () => {
+            const instance = await TokenContract.deployed();
+
+            const adaptiveFeeIncrease = new BN(1);
+            const adaptiveFeeMax = new BN(30);
+
+            await truffleAssert.passes(instance.updateAdaptiveSellFee(adaptiveFeeIncrease, adaptiveFeeMax, {from: deployer}));
+        });
+
+        it("should update adaptive fees with 0", async () => {
+            const instance = await TokenContract.deployed();
+
+            const adaptiveFeeIncrease = new BN(0);
+            const adaptiveFeeMax = new BN(40);
+
+            await truffleAssert.passes(instance.updateAdaptiveSellFee(adaptiveFeeIncrease, adaptiveFeeMax, {from: deployer}));
+        });
+
+        it("should revert update adaptive fees above max", async () => {
+            const instance = await TokenContract.deployed();
+
+            const adaptiveFeeIncrease = new BN(5);
+            const adaptiveFeeMax = new BN(500);
+
+            await truffleAssert.reverts(instance.updateAdaptiveSellFee(adaptiveFeeIncrease, adaptiveFeeMax, {from: deployer}), "Must keep fees at 30% or less");
+        });
+
+        it("should revert update adaptive fee increase above max", async () => {
+            const instance = await TokenContract.deployed();
+
+            const adaptiveFeeIncrease = new BN(120);
+            const adaptiveFeeMax = new BN(300);
+
+            await truffleAssert.reverts(instance.updateAdaptiveSellFee(adaptiveFeeIncrease, adaptiveFeeMax, {from: deployer}), "Must keep increate at 2% or less");
         });
 
         it("should revert update fees", async() => {
             const instance = await TokenContract.deployed();
 
-            const marketingFee = new BN(10);
-            const liquidityFee = new BN(5);
-            const buyFee = new BN(1);
-            const sellFee = new BN(1);
+            const marketingFee = new BN(100);
+            const liquidityFee = new BN(50);
+            const buyFee = new BN(10);
+            const sellFee = new BN(10);
 
             await truffleAssert.reverts(instance.updateFees(marketingFee, liquidityFee, buyFee, sellFee, {from: deployer}), "Must keep fees at 14% or less");
         });
@@ -163,10 +261,10 @@ contract("Token", ([deployer, user1, user2, user3, user4]) => {
         it("should revert update fees if not owner", async() => {
             const instance = await TokenContract.deployed();
 
-            const marketingFee = new BN(1);
-            const liquidityFee = new BN(1);
-            const buyFee = new BN(1);
-            const sellFee = new BN(1);
+            const marketingFee = new BN(10);
+            const liquidityFee = new BN(10);
+            const buyFee = new BN(10);
+            const sellFee = new BN(10);
 
             await truffleAssert.reverts(instance.updateFees(marketingFee, liquidityFee, buyFee, sellFee, {from: user1}));
         });
@@ -189,6 +287,20 @@ contract("Token", ([deployer, user1, user2, user3, user4]) => {
         it("should revert force swap tokens for eth if not owner",async () => {
             const instance = await TokenContract.deployed();
             await truffleAssert.fails(instance.forceSwap({from: user1}));
+        });
+
+        it("should revert if resetFees is called by non owner", async () => {
+            const instance = await TokenContract.deployed();
+            await truffleAssert.reverts(instance.resetAdaptiveFees({from: user1}));
+        });
+
+        it("should revert if update adataptiveFees is called by non owner", async () => {
+            const instance = await TokenContract.deployed();
+
+            const adaptiveFeeIncrease = new BN(2);
+            const adaptiveFeeMax = new BN(300);
+
+            await truffleAssert.reverts(instance.updateAdaptiveSellFee(adaptiveFeeIncrease, adaptiveFeeMax ,{from: user1}));
         });
         /*
         it("should force send eth",async () => {
@@ -249,6 +361,7 @@ contract("Token", ([deployer, user1, user2, user3, user4]) => {
         */
     });
 
+
     describe("transactions", async () => {
 
         before(async () => {
@@ -305,36 +418,163 @@ contract("Token", ([deployer, user1, user2, user3, user4]) => {
             
             await truffleAssert.passes(sell(user3, await instance.balanceOf(user3)));
             // Buy
-            await truffleAssert.passes(buy(user1, web3.utils.toWei('0.001')));            
+            await truffleAssert.passes(buy(user2, web3.utils.toWei('0.001')));            
         });
 
-        /*
-        it("should get fee from buy", async () => {
-            
-            const instance = await MagicContract.deployed();
-            const buyAmount = '1';
-            const buyAmount2 = '0.001';
+    });
+    
+    describe("adaptive fees", async () => {
+        before(async () => {
+            const instance = await TokenContract.deployed();
+        });
 
-            await fundWeth(user1, web3.utils.toWei('10'));
-            const tx = await buy(user1, web3.utils.toWei(buyAmount));
-            console.log(`Buy tx: ${tx.toString()}`)
-            //await fundWeth(user2, web3.utils.toWei('10'));
-            //await fundWeth(user3, web3.utils.toWei('10'));
-            
-            
-            console.log(`user1 amountOut: ${(await getAmountsOut(web3.utils.toWei(buyAmount))).toString()}`);
-            await buy(user1, web3.utils.toWei(buyAmount));
-            console.log(`user1 balance: ${(await instance.balanceOf(user1)).toString()}`);
+        beforeEach(async () => {
+            const instance = await TokenContract.deployed();
+            await instance.resetAdaptiveFees({from: deployer});
 
-            instance._tokensFromBuy.call()
+            await fundWeth(user1, web3.utils.toWei('1'));
+            await fundWeth(user2, web3.utils.toWei('1'));
+            await fundWeth(user3, web3.utils.toWei('1'));
+
+            await fundToken(user1, web3.utils.toWei('1000'));
+            await fundToken(user2, web3.utils.toWei('1000'));
+            await fundToken(user3, web3.utils.toWei('1000'));
+           
+        });
+
+        it("should not increase in case of buy", async () => {
+            const instance = await TokenContract.deployed();
+            // User1 buy
+            let tx = await buy(user1, web3.utils.toWei('0.001'));
+            // Workaround to handle nested events
+            let newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {buyFee: web3.utils.toBN(90)});
+
+            // User2 buy
+            tx = await buy(user2, web3.utils.toWei('0.001'));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {buyFee: web3.utils.toBN(90)});
+
+            // User3 buy
+            tx = await buy(user3, web3.utils.toWei('0.001'));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {buyFee: web3.utils.toBN(90)});
+        });
+
+        it("should increase in case of sell", async () => {
+            const instance = await TokenContract.deployed();
             
-            console.log(`user2 amountOut: ${(await getAmountsOut(web3.utils.toWei(buyAmount2))).toString()}`);
-            await buy(user2, web3.utils.toWei(buyAmount2));
-            console.log(`user2 balance: ${(await instance.balanceOf(user2)).toString()}`);
+            let tx = await sell(user1, await instance.balanceOf(user1));
+            // Workaround to handle nested events
+            let newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(95)});
+
+            tx = await sell(user2, await instance.balanceOf(user2));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 10%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(100)});
             
+            tx = await sell(user3, await instance.balanceOf(user3));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 10.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(105)});
 
         });
-        */
-    })
+
+        it("should decrease in case of buy", async () => {
+            const instance = await TokenContract.deployed();
+
+            // Sell
+            let tx = await sell(user1, await instance.balanceOf(user1));
+            // Workaround to handle nested events
+            let newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(95)});
+
+            // Buy
+            tx = await buy(user1, web3.utils.toWei('0.001'));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(90)});
+
+            // Sell
+            tx = await sell(user2, await instance.balanceOf(user2));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 10%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(95)});
+            
+            tx = await sell(user3, await instance.balanceOf(user3));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 10.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(100)});
+
+            // Buy
+            tx = await buy(user2, web3.utils.toWei('0.001'));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(95)});
+        });
+
+        it("should not go below _rewardSellFee", async () => {
+            const instance = await TokenContract.deployed();
+
+            let tx = await buy(user1, web3.utils.toWei('0.001'));
+            // Workaround to handle nested events
+            let newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(90)});
+
+            tx = await buy(user2, web3.utils.toWei('0.001'));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(90)});
+
+            tx = await buy(user3, web3.utils.toWei('0.001'));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 9.5%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(90)});
+        });
+
+        it("should not go above _adaptiveSellFeesMax", async () => {
+            const instance = await TokenContract.deployed();
+            //await fundToken(user1, web3.utils.toWei('1000000'));
+
+            let feeCounter = 95;
+            for(; feeCounter <= 350; feeCounter += 5) {
+                // Sell
+                let tx = await sell(user1, web3.utils.toWei('10'));
+                // Workaround to handle nested events
+                let newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+                // After the 1st sell, the sell fee should be 10%
+                truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(feeCounter)});
+            }
+            // Sell fee at max. Perform some more sells
+            let tx = await sell(user2, web3.utils.toWei('1000'));
+            // Workaround to handle nested events
+            let newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 10%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(350)});
+            // Sell fee at max. Perform some more sells
+            tx = await sell(user3, web3.utils.toWei('1000'));
+            // Workaround to handle nested events
+            newTx = await truffleAssert.createTransactionResult(instance, tx.tx);
+            // After the 1st sell, the sell fee should be 10%
+            truffleAssert.eventEmitted(newTx, 'AdaptiveFeesUpdated', {sellFee: web3.utils.toBN(350)});
+        });
+    });
         
 });
