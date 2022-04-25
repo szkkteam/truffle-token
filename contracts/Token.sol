@@ -196,7 +196,7 @@ contract Token is ERC20, Ownable {
                 if (amount > 2 * (_tokensFromSell)) {
                     buyReward = _tokensFromSell;
                 } else {
-                    buyReward = (amount / (2 * (_tokensFromSell + _tokensFromBuy))) * _tokensFromSell;
+                    buyReward = (amount / (2 * _tokensFromSell)) * _tokensFromSell;
                 }
                 _tokensFromSell -= buyReward;
 
